@@ -40,7 +40,7 @@ def main():
 
     parser.add_argument("--train_images_path", default="./dataset/train", type=str)
     parser.add_argument("--test_images_path", default="./dataset/test", type=str)
-    parser.add_argument("--num_dataset_processes", default=8, type=int)
+    parser.add_argument("--num_dataset_processes", default=1, type=int)
     parser.add_argument("--target_resolution", default=256, type=int)
     parser.add_argument("--brightness_jitter", default=0.1, type=float)
     parser.add_argument("--contrast_jitter", default=0.1, type=float)
@@ -49,13 +49,13 @@ def main():
     parser.add_argument("--num_epochs", default=100, type=int)
     parser.add_argument("--learning_rate", default=2e-4, type=float)
     parser.add_argument("--max_gradient_norm", default=2.0, type=float)
-    parser.add_argument("--primary_channels", default=64, type=int)
+    parser.add_argument("--primary_channels", default=32, type=int)
     parser.add_argument("--primary_layers", default=4, type=int)
-    parser.add_argument("--secondary_channels", default=128, type=int)
+    parser.add_argument("--secondary_channels", default=64, type=int)
     parser.add_argument("--secondary_layers", default=4, type=int)
-    parser.add_argument("--tertiary_channels", default=256, type=int)
+    parser.add_argument("--tertiary_channels", default=128, type=int)
     parser.add_argument("--tertiary_layers", default=4, type=int)
-    parser.add_argument("--quaternary_channels", default=512, type=int)
+    parser.add_argument("--quaternary_channels", default=256, type=int)
     parser.add_argument("--quaternary_layers", default=4, type=int)
     parser.add_argument("--hidden_ratio", default=2, type=int)
     parser.add_argument("--activation_checkpointing", action="store_true")
@@ -212,7 +212,7 @@ def main():
             y = y.to(args.device, non_blocking=True)
 
             with amp_context:
-                y_pred, _ = model.forward(x)
+                y_pred = model.forward(x)
 
                 l2_loss = l2_loss_function(y_pred, y)
                 vgg22_loss, vgg54_loss = vgg_loss_function(y_pred, y)

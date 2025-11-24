@@ -222,9 +222,9 @@ def main():
     critic.train()
 
     for epoch in range(starting_epoch, args.num_epochs + 1):
-        total_pixel_l2, total_u_stage_1_l2 = 0.0, 0.0
-        total_u_bce, total_c_bce = 0.0, 0.0
-        total_u_gradient_norm, total_c_gradient_norm = 0.0, 0.0
+        total_pixel_l2, total_g_stage_1_l2 = 0.0, 0.0
+        total_g_bce, total_c_bce = 0.0, 0.0
+        total_g_gradient_norm, total_c_gradient_norm = 0.0, 0.0
         total_batches, total_steps = 0, 0
 
         is_warmup = epoch <= args.critic_warmup_epochs
@@ -241,9 +241,9 @@ def main():
             update_this_step = step % args.gradient_accumulation_steps == 0
 
             with amp_context:
-                u_pred, _ = generator.forward(x)
+                g_pred = generator.forward(x)
 
-                _, _, _, _, c_pred_fake = critic.forward(u_pred.detach())
+                _, _, _, _, c_pred_fake = critic.forward(g_pred.detach())
                 _, _, _, _, c_pred_real = critic.forward(y)
 
                 c_bce = bce_loss.forward(c_pred_real, c_pred_fake, y_real, y_fake)
@@ -269,27 +269,27 @@ def main():
 
             if not is_warmup:
                 with amp_context:
-                    pixel_l2 = pixel_l2_loss.forward(u_pred, y)
+                    pixel_l2 = pixel_l2_loss.forward(g_pred, y)
 
-                    z1_fake, _, _, _, c_pred_fake = critic.forward(u_pred)
+                    z1_fake, _, _, _, c_pred_fake = critic.forward(g_pred)
                     z1_real, _, _, _, c_pred_real = critic.forward(y)
 
-                    u_stage_1_l2 = stage_1_l2_loss.forward(z1_fake, z1_real)
+                    g_stage_1_l2 = stage_1_l2_loss.forward(z1_fake, z1_real)
 
-                    u_bce = bce_loss.forward(c_pred_real, c_pred_fake, y_fake, y_real)
+                    g_bce = bce_loss.forward(c_pred_real, c_pred_fake, y_fake, y_real)
 
-                    combined_u_loss = (
+                    combined_g_loss = (
                         pixel_l2 / pixel_l2.detach()
-                        + u_stage_1_l2 / u_stage_1_l2.detach()
-                        + u_bce / u_bce.detach()
+                        + g_stage_1_l2 / g_stage_1_l2.detach()
+                        + g_bce / g_bce.detach()
                     )
 
-                    scaled_u_loss = combined_u_loss / args.gradient_accumulation_steps
+                    scaled_g_loss = combined_g_loss / args.gradient_accumulation_steps
 
-                scaled_u_loss.backward()
+                scaled_g_loss.backward()
 
                 if update_this_step:
-                    u_norm = clip_grad_norm_(
+                    g_norm = clip_grad_norm_(
                         generator.parameters(), args.generator_max_gradient_norm
                     )
 
@@ -297,35 +297,35 @@ def main():
 
                     generator_optimizer.zero_grad()
 
-                    total_u_gradient_norm += u_norm.item()
+                    total_g_gradient_norm += g_norm.item()
 
                 total_pixel_l2 += pixel_l2.item()
-                total_u_stage_1_l2 += u_stage_1_l2.item()
-                total_u_bce += u_bce.item()
+                total_g_stage_1_l2 += g_stage_1_l2.item()
+                total_g_bce += g_bce.item()
 
             total_batches += 1
 
         average_pixel_l2 = total_pixel_l2 / total_batches
-        average_u_stage_1_l2 = total_u_stage_1_l2 / total_batches
-        average_u_bce = total_u_bce / total_batches
+        average_g_stage_1_l2 = total_g_stage_1_l2 / total_batches
+        average_g_bce = total_g_bce / total_batches
         average_c_bce = total_c_bce / total_batches
 
-        average_u_gradient_norm = total_u_gradient_norm / total_steps
+        average_g_gradient_norm = total_g_gradient_norm / total_steps
         average_c_gradient_norm = total_c_gradient_norm / total_steps
 
         logger.add_scalar("Pixel L2", average_pixel_l2, epoch)
-        logger.add_scalar("Stage 1 L2", average_u_stage_1_l2, epoch)
-        logger.add_scalar("Generator BCE", average_u_bce, epoch)
-        logger.add_scalar("Generator Norm", average_u_gradient_norm, epoch)
+        logger.add_scalar("Stage 1 L2", average_g_stage_1_l2, epoch)
+        logger.add_scalar("Generator BCE", average_g_bce, epoch)
+        logger.add_scalar("Generator Norm", average_g_gradient_norm, epoch)
         logger.add_scalar("Critic BCE", average_c_bce, epoch)
         logger.add_scalar("Critic Norm", average_c_gradient_norm, epoch)
 
         print(
             f"Epoch {epoch}:",
             f"Pixel L2: {average_pixel_l2:.5},",
-            f"Stage 1 L2: {average_u_stage_1_l2:.5},",
-            f"Generator BCE: {average_u_bce:.5},",
-            f"Generator Norm: {average_u_gradient_norm:.4},",
+            f"Stage 1 L2: {average_g_stage_1_l2:.5},",
+            f"Generator BCE: {average_g_bce:.5},",
+            f"Generator Norm: {average_g_gradient_norm:.4},",
             f"Critic BCE: {average_c_bce:.5},",
             f"Critic Norm: {average_c_gradient_norm:.4}",
         )
@@ -341,10 +341,10 @@ def main():
                 y_real = torch.full((y.size(0), 1), 1.0).to(args.device)
                 y_fake = torch.full((y.size(0), 1), 0.0).to(args.device)
 
-                u_pred = generator.upscale(x)
+                g_pred = generator.upscale(x)
 
                 c_pred_real = critic.predict(y)
-                c_pred_fake = critic.predict(u_pred)
+                c_pred_fake = critic.predict(g_pred)
 
                 c_pred_real -= c_pred_fake.mean()
                 c_pred_fake -= c_pred_real.mean()
@@ -352,9 +352,9 @@ def main():
                 c_pred = torch.cat((c_pred_real, c_pred_fake), dim=0)
                 labels = torch.cat((y_real, y_fake), dim=0)
 
-                psnr_metric.update(u_pred, y)
-                ssim_metric.update(u_pred, y)
-                vif_metric.update(u_pred, y)
+                psnr_metric.update(g_pred, y)
+                ssim_metric.update(g_pred, y)
+                vif_metric.update(g_pred, y)
 
                 precision_metric.update(c_pred, labels)
                 recall_metric.update(c_pred, labels)

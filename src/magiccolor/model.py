@@ -115,8 +115,6 @@ class MagicColor(Module, PyTorchModelHubMixin):
         self.encoder.add_weight_norms()
         self.decoder.add_weight_norms()
 
-        self.projector = weight_norm(self.projector)
-
     def add_lora_adapters(self, rank: int, alpha: float) -> None:
         """Add LoRA adapters to all convolutional layers in the network."""
 
@@ -499,7 +497,10 @@ class Decoder(Module):
         ), "Number of quaternary layers must be greater than 0."
 
         self.stage1 = Sequential(
-            *[DecoderBlock(primary_channels) for _ in range(primary_layers)]
+            *[
+                DecoderBlock(primary_channels, hidden_ratio)
+                for _ in range(primary_layers)
+            ]
         )
 
         self.stage2 = Sequential(
@@ -510,7 +511,10 @@ class Decoder(Module):
         )
 
         self.stage3 = Sequential(
-            *[DecoderBlock(tertiary_channels) for _ in range(tertiary_layers)]
+            *[
+                DecoderBlock(tertiary_channels, hidden_ratio)
+                for _ in range(tertiary_layers)
+            ]
         )
 
         self.stage4 = Sequential(
