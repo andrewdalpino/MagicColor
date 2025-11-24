@@ -269,7 +269,7 @@ def main():
                 x = x.to(args.device, non_blocking=True)
                 y = y.to(args.device, non_blocking=True)
 
-                y_pred = model.upscale(x)
+                y_pred = model.colorize(x)
 
                 psnr_metric.update(y_pred, y)
                 ssim_metric.update(y_pred, y)

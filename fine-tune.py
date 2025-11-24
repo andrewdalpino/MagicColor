@@ -341,7 +341,7 @@ def main():
                 y_real = torch.full((y.size(0), 1), 1.0).to(args.device)
                 y_fake = torch.full((y.size(0), 1), 0.0).to(args.device)
 
-                g_pred = generator.upscale(x)
+                g_pred = generator.colorize(x)
 
                 c_pred_real = critic.predict(y)
                 c_pred_fake = critic.predict(g_pred)
