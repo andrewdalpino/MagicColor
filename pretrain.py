@@ -19,6 +19,7 @@ from torchvision.transforms.v2 import (
     CenterCrop,
     RandomCrop,
     RandomHorizontalFlip,
+    ColorJitter,
 )
 
 from torchmetrics.image import (
@@ -35,12 +36,14 @@ from tqdm import tqdm
 
 
 def main():
-    parser = ArgumentParser(description="Training script")
+    parser = ArgumentParser(description="Pretraining script.")
 
     parser.add_argument("--train_images_path", default="./dataset/train", type=str)
     parser.add_argument("--test_images_path", default="./dataset/test", type=str)
     parser.add_argument("--num_dataset_processes", default=8, type=int)
     parser.add_argument("--target_resolution", default=256, type=int)
+    parser.add_argument("--brightness_jitter", default=0.1, type=float)
+    parser.add_argument("--contrast_jitter", default=0.1, type=float)
     parser.add_argument("--batch_size", default=32, type=int)
     parser.add_argument("--gradient_accumulation_steps", default=4, type=int)
     parser.add_argument("--num_epochs", default=100, type=int)
@@ -119,6 +122,10 @@ def main():
             [
                 RandomCrop(args.target_resolution),
                 RandomHorizontalFlip(),
+                ColorJitter(
+                    brightness=args.brightness_jitter,
+                    contrast=args.contrast_jitter,
+                ),
             ]
         ),
     )

@@ -20,6 +20,7 @@ from torchvision.transforms.v2 import (
     CenterCrop,
     RandomCrop,
     RandomHorizontalFlip,
+    ColorJitter,
 )
 
 from torchmetrics.image import (
@@ -45,6 +46,8 @@ def main():
     parser.add_argument("--test_images_path", default="./dataset/test", type=str)
     parser.add_argument("--num_dataset_processes", default=8, type=int)
     parser.add_argument("--target_resolution", default=256, type=int)
+    parser.add_argument("--brightness_jitter", default=0.1, type=float)
+    parser.add_argument("--contrast_jitter", default=0.1, type=float)
     parser.add_argument("--batch_size", default=16, type=int)
     parser.add_argument("--gradient_accumulation_steps", default=8, type=int)
     parser.add_argument("--generator_learning_rate", default=1e-4, type=float)
@@ -124,6 +127,10 @@ def main():
             [
                 RandomCrop(args.target_resolution),
                 RandomHorizontalFlip(),
+                ColorJitter(
+                    brightness=args.brightness_jitter,
+                    contrast=args.contrast_jitter,
+                ),
             ]
         ),
     )

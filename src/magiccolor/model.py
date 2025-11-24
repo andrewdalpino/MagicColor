@@ -35,7 +35,12 @@ from huggingface_hub import PyTorchModelHubMixin
 
 class MagicColor(Module, PyTorchModelHubMixin):
     """
-    A deep learning model for colorizing grayscale images.
+    A deep learning model for colorizing grayscale images. Magic Color employs a
+    residual U-Net architecture with four encoding stages and four decoding stages.
+
+    Each stage consists of multiple encoder/decoder blocks with spatial attention and
+    inverted bottleneck layers. Down and upsampling of the feature maps is performed
+    using pure convolutions.
     """
 
     def __init__(
@@ -51,6 +56,18 @@ class MagicColor(Module, PyTorchModelHubMixin):
         hidden_ratio: int,
     ):
         super().__init__()
+
+        assert primary_layers > 1, "Number of primary layers must be greater than 1."
+
+        assert (
+            secondary_layers > 1
+        ), "Number of secondary layers must be greater than 1."
+
+        assert tertiary_layers > 1, "Number of tertiary layers must be greater than 1."
+
+        assert (
+            quaternary_layers > 1
+        ), "Number of quaternary layers must be greater than 1."
 
         self.encoder = Encoder(
             primary_channels,
@@ -75,8 +92,6 @@ class MagicColor(Module, PyTorchModelHubMixin):
             floor(primary_layers / 2),
             hidden_ratio,
         )
-
-        self.projector = Conv2d(primary_channels, 3, kernel_size=1)
 
     @property
     def num_params(self) -> int:
@@ -108,12 +123,6 @@ class MagicColor(Module, PyTorchModelHubMixin):
         self.encoder.add_lora_adapters(rank, alpha)
         self.decoder.add_lora_adapters(rank, alpha)
 
-        register_parametrization(
-            self.projector,
-            "weight",
-            ChannelLoRA(self.projector, rank, alpha),
-        )
-
     def remove_parameterizations(self) -> None:
         """Remove all network parameterizations."""
 
@@ -141,8 +150,6 @@ class MagicColor(Module, PyTorchModelHubMixin):
 
         z1, z2, z3, z4 = self.encoder.forward(x)
         z = self.decoder.forward(z4, z3, z2, z1)
-
-        z = self.projector.forward(z)
 
         return z
 
@@ -264,10 +271,6 @@ class Encoder(Module):
         self.downsample3.add_weight_norms()
 
     def add_lora_adapters(self, rank: int, alpha: float) -> None:
-        register_parametrization(
-            self.stem, "weight", ChannelLoRA(self.stem, rank, alpha)
-        )
-
         for layer in self.stage1:
             layer.add_lora_adapters(rank, alpha)
 
@@ -283,6 +286,10 @@ class Encoder(Module):
         self.downsample1.add_lora_adapters(rank, alpha)
         self.downsample2.add_lora_adapters(rank, alpha)
         self.downsample3.add_lora_adapters(rank, alpha)
+
+        register_parametrization(
+            self.stem, "weight", ChannelLoRA(self.stem, rank, alpha)
+        )
 
     def enable_activation_checkpointing(self) -> None:
         """
@@ -430,6 +437,9 @@ class PixelCrush(Module):
     def __init__(self, in_channels: int, out_channels: int, crush_factor: int):
         super().__init__()
 
+        assert in_channels > 0, "Input channels must be greater than 0."
+        assert out_channels > 0, "Output channels must be greater than 0."
+
         assert crush_factor in {
             2,
             3,
@@ -476,6 +486,18 @@ class Decoder(Module):
     ):
         super().__init__()
 
+        assert primary_layers > 0, "Number of primary layers must be greater than 0."
+
+        assert (
+            secondary_layers > 0
+        ), "Number of secondary layers must be greater than 0."
+
+        assert tertiary_layers > 0, "Number of tertiary layers must be greater than 0."
+
+        assert (
+            quaternary_layers > 0
+        ), "Number of quaternary layers must be greater than 0."
+
         self.stage1 = Sequential(
             *[DecoderBlock(primary_channels) for _ in range(primary_layers)]
         )
@@ -502,6 +524,8 @@ class Decoder(Module):
         self.upsample2 = SubpixelConv2d(secondary_channels, tertiary_channels, 2)
         self.upsample3 = SubpixelConv2d(tertiary_channels, quaternary_channels, 2)
 
+        self.head = Conv2d(quaternary_channels, 3, kernel_size=1)
+
         self.checkpoint = lambda layer, x: layer.forward(x)
 
     def add_weight_norms(self) -> None:
@@ -521,6 +545,8 @@ class Decoder(Module):
         self.upsample2.add_weight_norms()
         self.upsample3.add_weight_norms()
 
+        self.head = weight_norm(self.head)
+
     def add_lora_adapters(self, rank: int, alpha: float) -> None:
         for layer in self.stage1:
             layer.add_lora_adapters(rank, alpha)
@@ -537,6 +563,10 @@ class Decoder(Module):
         self.upsample1.add_lora_adapters(rank, alpha)
         self.upsample2.add_lora_adapters(rank, alpha)
         self.upsample3.add_lora_adapters(rank, alpha)
+
+        register_parametrization(
+            self.head, "weight", ChannelLoRA(self.head, rank, alpha)
+        )
 
     def enable_activation_checkpointing(self) -> None:
         """
@@ -563,6 +593,7 @@ class Decoder(Module):
         z = x4 + z  # Global residual connection
 
         z = self.checkpoint(self.stage4, z)
+        z = self.head.forward(z)
 
         return z
 
@@ -576,6 +607,9 @@ class SubpixelConv2d(Module):
 
     def __init__(self, in_channels: int, out_channels: int, upscale_ratio: int):
         super().__init__()
+
+        assert in_channels > 0, "Input channels must be greater than 0."
+        assert out_channels > 0, "Output channels must be greater than 0."
 
         assert upscale_ratio in {
             2,
@@ -747,19 +781,19 @@ class Bouncer(Module):
     def forward(self, x: Tensor) -> tuple[Tensor, ...]:
         z1, z2, z3, z4 = self.detector.forward(x)
 
-        z5 = self.pool.forward(z4)
-        z5 = self.flatten.forward(z5)
-        z5 = self.classifier.forward(z5)
+        z = self.pool.forward(z4)
+        z = self.flatten.forward(z)
+        z = self.classifier.forward(z)
 
-        return z1, z2, z3, z4, z5
+        return z1, z2, z3, z4, z
 
     @torch.no_grad()
     def predict(self, x: Tensor) -> Tensor:
         """Return the probability that the input image is real or fake."""
 
-        _, _, _, _, z5 = self.forward(x)
+        _, _, _, _, z = self.forward(x)
 
-        return z5
+        return z
 
 
 class Detector(Module):
@@ -767,67 +801,51 @@ class Detector(Module):
 
     def __init__(
         self,
-        num_primary_channels: int,
-        num_primary_layers: int,
-        num_secondary_channels: int,
-        num_secondary_layers: int,
-        num_tertiary_channels: int,
-        num_tertiary_layers: int,
-        num_quaternary_channels: int,
-        num_quaternary_layers: int,
+        primary_channels: int,
+        primary_layers: int,
+        secondary_channels: int,
+        secondary_layers: int,
+        tertiary_channels: int,
+        tertiary_layers: int,
+        quaternary_channels: int,
+        quaternary_layers: int,
     ):
         super().__init__()
 
-        assert (
-            num_primary_layers > 0
-        ), "Number of primary layers must be greater than 0."
+        assert primary_layers > 0, "Number of primary layers must be greater than 0."
 
         assert (
-            num_secondary_layers > 0
+            secondary_layers > 0
         ), "Number of secondary layers must be greater than 0."
 
-        assert (
-            num_tertiary_layers > 0
-        ), "Number of tertiary layers must be greater than 0."
+        assert tertiary_layers > 0, "Number of tertiary layers must be greater than 0."
 
         assert (
-            num_quaternary_layers > 0
+            quaternary_layers > 0
         ), "Number of quaternary layers must be greater than 0."
 
-        self.downsample1 = PixelCrush(3, num_primary_channels, 2)
+        self.downsample1 = PixelCrush(3, primary_channels, 2)
 
         self.stage1 = Sequential(
-            *[
-                DetectorBlock(num_primary_channels, 4)
-                for _ in range(num_primary_layers)
-            ],
+            *[DetectorBlock(primary_channels, 4) for _ in range(primary_layers)],
         )
 
-        self.downsample2 = PixelCrush(num_primary_channels, num_secondary_channels, 2)
+        self.downsample2 = PixelCrush(primary_channels, secondary_channels, 2)
 
         self.stage2 = Sequential(
-            *[
-                DetectorBlock(num_secondary_channels, 4)
-                for _ in range(num_secondary_layers)
-            ],
+            *[DetectorBlock(secondary_channels, 4) for _ in range(secondary_layers)],
         )
 
-        self.downsample3 = PixelCrush(num_secondary_channels, num_tertiary_channels, 2)
+        self.downsample3 = PixelCrush(secondary_channels, tertiary_channels, 2)
 
         self.stage3 = Sequential(
-            *[
-                DetectorBlock(num_tertiary_channels, 4)
-                for _ in range(num_tertiary_layers)
-            ],
+            *[DetectorBlock(tertiary_channels, 4) for _ in range(tertiary_layers)],
         )
 
-        self.downsample4 = PixelCrush(num_tertiary_channels, num_quaternary_channels, 2)
+        self.downsample4 = PixelCrush(tertiary_channels, quaternary_channels, 2)
 
         self.stage4 = Sequential(
-            *[
-                DetectorBlock(num_quaternary_channels, 4)
-                for _ in range(num_quaternary_layers)
-            ],
+            *[DetectorBlock(quaternary_channels, 4) for _ in range(quaternary_layers)],
         )
 
         self.checkpoint = lambda layer, x: layer(x)
