@@ -142,8 +142,13 @@ class MagicColor(Module, PyTorchModelHubMixin):
 
     def forward(self, x: Tensor) -> Tensor:
         """
+        Predict the color channels of a grayscale image.
+
         Args:
-            x: Input image tensor of shape (B, 1, H, W).
+            x: Input image tensor of shape (B, 1, H, W) in Lab color format.
+
+        Returns:
+            z: The A and B color channels of the image.
         """
 
         z1, z2, z3, z4 = self.encoder.forward(x)
@@ -160,9 +165,13 @@ class MagicColor(Module, PyTorchModelHubMixin):
             x: Input image tensor of shape (B, 1, H, W).
         """
 
+        x = torch.clamp(x, 0, 100)
+
         z = self.forward(x)
 
-        z = torch.clamp(z, 0, 1)
+        z = torch.clamp(z, -128, 127)
+
+        z = torch.cat([x, z], dim=1)
 
         return z
 
@@ -319,71 +328,18 @@ class EncoderBlock(Module):
     def __init__(self, num_channels: int, hidden_ratio: int):
         super().__init__()
 
-        self.stage1 = SpatialAttention(num_channels)
-        self.stage2 = InvertedBottleneck(num_channels, hidden_ratio)
+        self.stage1 = InvertedBottleneck(num_channels, hidden_ratio)
 
     def add_weight_norms(self) -> None:
         self.stage1.add_weight_norms()
-        self.stage2.add_weight_norms()
 
     def add_lora_adapters(self, rank: int, alpha: float) -> None:
         self.stage1.add_lora_adapters(rank, alpha)
-        self.stage2.add_lora_adapters(rank, alpha)
 
     def forward(self, x: Tensor) -> Tensor:
         z = self.stage1.forward(x)
-        z = self.stage2.forward(z)
 
         z = x + z  # Local residual connection
-
-        return z
-
-
-class SpatialAttention(Module):
-    """A spatial attention module with large depth-wise separable convolutions."""
-
-    def __init__(self, num_channels: int):
-        super().__init__()
-
-        assert num_channels > 0, "Number of channels must be greater than 0."
-
-        self.depthwise = Conv2d(
-            num_channels,
-            num_channels,
-            kernel_size=11,
-            padding=5,
-            groups=num_channels,
-            bias=False,
-        )
-
-        self.pointwise = Conv2d(num_channels, num_channels, kernel_size=1)
-
-        self.sigmoid = Sigmoid()
-
-    def add_weight_norms(self) -> None:
-        self.depthwise = weight_norm(self.depthwise)
-        self.pointwise = weight_norm(self.pointwise)
-
-    def add_lora_adapters(self, rank: int, alpha: float) -> None:
-        register_parametrization(
-            self.depthwise,
-            "weight",
-            ChannelLoRA(self.depthwise, rank, alpha),
-        )
-
-        register_parametrization(
-            self.pointwise,
-            "weight",
-            ChannelLoRA(self.pointwise, rank, alpha),
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        z = self.depthwise.forward(x)
-        z = self.pointwise.forward(z)
-
-        z = self.sigmoid.forward(z)
-
-        z = z * x
 
         return z
 
@@ -528,7 +484,7 @@ class Decoder(Module):
         self.upsample2 = SubpixelConv2d(secondary_channels, tertiary_channels, 2)
         self.upsample3 = SubpixelConv2d(tertiary_channels, quaternary_channels, 2)
 
-        self.head = Conv2d(quaternary_channels, 3, kernel_size=1)
+        self.head = Conv2d(quaternary_channels, 2, kernel_size=1)
 
         self.checkpoint = lambda layer, x: layer.forward(x)
 
