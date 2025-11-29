@@ -9,14 +9,18 @@ from torch.utils.data import Dataset
 
 from torchvision.io import decode_image
 
-from torchvision.transforms.v2 import Transform, ToDtype
-
-from kornia.color import rgb_to_lab
+from torchvision.transforms.v2 import Transform, Grayscale, ToDtype
 
 from PIL import Image
 
 
-class ColorCrush(Dataset):
+class ImageFolder(Dataset):
+    """
+    Grab all the images contained in a folder (and its subfolders) that are at least
+    of a specified target resolution. Converts the images to grayscale as input and
+    keeps the original colored images as targets.
+    """
+
     ALLOWED_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
 
     IMAGE_MODE = "RGB"
@@ -57,10 +61,13 @@ class ColorCrush(Dataset):
                 f"than the target resolution of {target_resolution}."
             )
 
+        grayscale_transform = Grayscale()
+
         to_tensor_transform = ToDtype(torch.float32, scale=True)
 
         self.image_paths = image_paths
         self.pre_transform = pre_transform
+        self.grayscale_transform = grayscale_transform
         self.to_tensor_transform = to_tensor_transform
 
     @classmethod
@@ -72,17 +79,18 @@ class ColorCrush(Dataset):
     def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
         image_path = self.image_paths[index]
 
-        rgb_image = decode_image(image_path, mode=self.IMAGE_MODE)
+        image = decode_image(image_path, mode=self.IMAGE_MODE)
 
         if self.pre_transform:
-            rgb_image = self.pre_transform.forward(rgb_image)
+            image = self.pre_transform.forward(image)
 
-        rgb_image = self.to_tensor_transform.forward(rgb_image)
+        x = self.grayscale_transform.forward(image)
+        x = self.to_tensor_transform.forward(x)
 
-        lab_image = rgb_to_lab(rgb_image)
+        y = self.to_tensor_transform.forward(image)
 
-        x = lab_image[0:1, :, :]
-        y = lab_image[1:3, :, :]
+        assert x.shape[0] == 1, "X image must have a single channel."
+        assert y.shape[0] == 3, "Y image must have three channels."
 
         assert x.shape[1] == y.shape[1], "X and y images must be the same height."
         assert x.shape[2] == y.shape[2], "X and y images must be the same width."

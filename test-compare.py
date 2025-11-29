@@ -5,11 +5,8 @@ from argparse import ArgumentParser
 import torch
 
 from torchvision.io import decode_image
-from torchvision.transforms.v2 import ToDtype
+from torchvision.transforms.v2 import ToDtype, CenterCrop, Grayscale
 from torchvision.utils import make_grid, save_image
-from torchvision.transforms.v2.functional import center_crop
-
-from kornia.color import rgb_to_lab, lab_to_rgb
 
 from src.magiccolor.model import MagicColor
 
@@ -32,11 +29,11 @@ def main():
 
     checkpoint = torch.load(args.checkpoint_path, map_location="cpu", weights_only=True)
 
-    model = MagicColor(**checkpoint["model_args"])
+    model = MagicColor(**checkpoint["colorizer_args"])
 
-    model.add_weight_norms()
+    model.generator.add_weight_norms()
 
-    state_dict = checkpoint["model"]
+    state_dict = checkpoint["colorizer"]
 
     # Compensate for compiled state dict.
     for key in list(state_dict.keys()):
@@ -44,7 +41,7 @@ def main():
 
     model.load_state_dict(state_dict)
 
-    model.remove_parameterizations()
+    model.generator.remove_parameterizations()
 
     model = model.to(args.device)
 
@@ -52,17 +49,15 @@ def main():
 
     print("Model checkpoint loaded successfully")
 
-    image_to_tensor = ToDtype(torch.float32, scale=True)
+    center_crop = CenterCrop((768, 768))
+    rgb_to_grayscale = Grayscale(num_output_channels=1)
+    to_tensor = ToDtype(torch.float32, scale=True)
 
-    rgb_image = decode_image(args.image_path, mode="RGB")
+    image = decode_image(args.image_path, mode="RGB")
 
-    rgb_image = center_crop(rgb_image, 1024)
-
-    rgb_image = image_to_tensor(rgb_image)
-
-    lab_image = rgb_to_lab(rgb_image)
-
-    x = lab_image[0:1, :, :]
+    x = center_crop.forward(image)
+    x = rgb_to_grayscale.forward(x)
+    x = to_tensor.forward(x)
 
     x = x.unsqueeze(0).to(args.device)
 
@@ -71,7 +66,20 @@ def main():
     with torch.inference_mode():
         y_pred = model.colorize(x).squeeze(0)
 
-    y_pred = lab_to_rgb(y_pred)
+    pair = torch.stack(
+        [
+            x.squeeze(0).expand(3, -1, -1),
+            y_pred,
+        ],
+        dim=0,
+    )
+
+    grid = make_grid(pair, nrow=2)
+
+    grid = grid.permute(1, 2, 0).to("cpu")
+
+    plt.imshow(grid)
+    plt.show()
 
     if "y" in input("Save image? (yes|no): ").lower():
         filename = f"out_{time()}"

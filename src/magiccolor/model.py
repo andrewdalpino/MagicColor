@@ -57,6 +57,113 @@ class MagicColor(Module, PyTorchModelHubMixin):
     ):
         super().__init__()
 
+        self.generator = ImageGenerator(
+            input_channels=1,
+            primary_channels=primary_channels,
+            primary_layers=primary_layers,
+            secondary_channels=secondary_channels,
+            secondary_layers=secondary_layers,
+            tertiary_channels=tertiary_channels,
+            tertiary_layers=tertiary_layers,
+            quaternary_channels=quaternary_channels,
+            quaternary_layers=quaternary_layers,
+            hidden_ratio=hidden_ratio,
+            output_channels=3,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Predict the color channels of a grayscale image.
+
+        Args:
+            x: Input image tensor of shape (B, 1, H, W).
+        """
+
+        z = self.generator.forward(x)
+
+        return z
+
+    @torch.inference_mode()
+    def colorize(self, x: Tensor) -> Tensor:
+        """
+        Convenience method for inference.
+
+        Args:
+            x: Input image tensor of shape (B, 1, H, W).
+        """
+
+        z = self.forward(x)
+
+        z = torch.clamp(z, 0, 1)
+
+        return z
+
+
+class ColorCrush(Module):
+    """
+    Does the opposite of MagicColor, predicting the gray channel from a color image.
+    """
+
+    def __init__(
+        self,
+        primary_channels: int,
+        primary_layers: int,
+        secondary_channels: int,
+        secondary_layers: int,
+        tertiary_channels: int,
+        tertiary_layers: int,
+        quaternary_channels: int,
+        quaternary_layers: int,
+        hidden_ratio: int,
+    ):
+        super().__init__()
+
+        self.generator = ImageGenerator(
+            input_channels=3,
+            primary_channels=primary_channels,
+            primary_layers=primary_layers,
+            secondary_channels=secondary_channels,
+            secondary_layers=secondary_layers,
+            tertiary_channels=tertiary_channels,
+            tertiary_layers=tertiary_layers,
+            quaternary_channels=quaternary_channels,
+            quaternary_layers=quaternary_layers,
+            hidden_ratio=hidden_ratio,
+            output_channels=1,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Predict the gray channel of a color image.
+
+        Args:
+            x: Input image tensor of shape (B, 3, H, W).
+        """
+
+        z = self.generator.forward(x)
+
+        return z
+
+
+class ImageGenerator(Module):
+    def __init__(
+        self,
+        input_channels: int,
+        primary_channels: int,
+        primary_layers: int,
+        secondary_channels: int,
+        secondary_layers: int,
+        tertiary_channels: int,
+        tertiary_layers: int,
+        quaternary_channels: int,
+        quaternary_layers: int,
+        hidden_ratio: int,
+        output_channels: int,
+    ):
+        super().__init__()
+
+        assert input_channels in {1, 2, 3}, "Input channels must be either 1, 2, or 3."
+
         assert primary_layers > 1, "Number of primary layers must be greater than 1."
 
         assert (
@@ -69,7 +176,14 @@ class MagicColor(Module, PyTorchModelHubMixin):
             quaternary_layers > 1
         ), "Number of quaternary layers must be greater than 1."
 
+        assert output_channels in {
+            1,
+            2,
+            3,
+        }, "Output channels must be either 1, 2, or 3."
+
         self.encoder = Encoder(
+            input_channels,
             primary_channels,
             ceil(primary_layers / 2),
             secondary_channels,
@@ -91,6 +205,7 @@ class MagicColor(Module, PyTorchModelHubMixin):
             primary_channels,
             floor(primary_layers / 2),
             hidden_ratio,
+            output_channels,
         )
 
     @property
@@ -145,33 +260,11 @@ class MagicColor(Module, PyTorchModelHubMixin):
         Predict the color channels of a grayscale image.
 
         Args:
-            x: Input image tensor of shape (B, 1, H, W) in Lab color format.
-
-        Returns:
-            z: The A and B color channels of the image.
+            x: Input image tensor of shape (B, C, H, W).
         """
 
         z1, z2, z3, z4 = self.encoder.forward(x)
         z = self.decoder.forward(z4, z3, z2, z1)
-
-        return z
-
-    @torch.inference_mode()
-    def colorize(self, x: Tensor) -> Tensor:
-        """
-        Convenience method for inference.
-
-        Args:
-            x: Input image tensor of shape (B, 1, H, W).
-        """
-
-        x = torch.clamp(x, 0, 100)
-
-        z = self.forward(x)
-
-        z = torch.clamp(z, -128, 127)
-
-        z = torch.cat([x, z], dim=1)
 
         return z
 
@@ -198,6 +291,7 @@ class Encoder(Module):
 
     def __init__(
         self,
+        input_channels: int,
         primary_channels: int,
         primary_layers: int,
         secondary_channels: int,
@@ -222,7 +316,7 @@ class Encoder(Module):
             quaternary_layers > 0
         ), "Number of quaternary layers must be greater than 0."
 
-        self.stem = Conv2d(1, primary_channels, kernel_size=1)
+        self.stem = Conv2d(input_channels, primary_channels, kernel_size=1)
 
         self.stage1 = Sequential(
             *[
@@ -437,6 +531,7 @@ class Decoder(Module):
         quaternary_channels: int,
         quaternary_layers: int,
         hidden_ratio: int,
+        output_channels: int,
     ):
         super().__init__()
 
@@ -484,7 +579,7 @@ class Decoder(Module):
         self.upsample2 = SubpixelConv2d(secondary_channels, tertiary_channels, 2)
         self.upsample3 = SubpixelConv2d(tertiary_channels, quaternary_channels, 2)
 
-        self.head = Conv2d(quaternary_channels, 2, kernel_size=1)
+        self.head = Conv2d(quaternary_channels, output_channels, kernel_size=1)
 
         self.checkpoint = lambda layer, x: layer.forward(x)
 
@@ -645,79 +740,82 @@ class Bouncer(Module):
     AVAILABLE_MODEL_SIZES = {"small", "medium", "large"}
 
     @classmethod
-    def from_preconfigured(cls, model_size: str) -> Self:
+    def from_preconfigured(cls, input_channels: int, model_size: str) -> Self:
         """Return a new pre-configured model."""
 
         assert model_size in cls.AVAILABLE_MODEL_SIZES, "Invalid model size."
 
-        num_primary_layers = 3
-        num_quaternary_layers = 3
+        primary_layers = 3
+        quaternary_layers = 3
 
         match model_size:
             case "small":
-                num_primary_channels = 64
-                num_secondary_channels = 128
-                num_secondary_layers = 3
-                num_tertiary_channels = 256
-                num_tertiary_layers = 9
-                num_quaternary_channels = 512
+                primary_channels = 32
+                secondary_channels = 64
+                secondary_layers = 3
+                tertiary_channels = 128
+                tertiary_layers = 6
+                quaternary_channels = 256
 
             case "medium":
-                num_primary_channels = 96
-                num_secondary_channels = 192
-                num_secondary_layers = 3
-                num_tertiary_channels = 384
-                num_tertiary_layers = 24
-                num_quaternary_channels = 768
+                primary_channels = 64
+                secondary_channels = 128
+                secondary_layers = 3
+                tertiary_channels = 256
+                tertiary_layers = 12
+                quaternary_channels = 512
 
             case "large":
-                num_primary_channels = 128
-                num_secondary_channels = 256
-                num_secondary_layers = 6
-                num_tertiary_channels = 512
-                num_tertiary_layers = 36
-                num_quaternary_channels = 1024
+                primary_channels = 128
+                secondary_channels = 256
+                secondary_layers = 6
+                tertiary_channels = 512
+                tertiary_layers = 24
+                quaternary_channels = 1024
 
         return cls(
-            num_primary_channels,
-            num_primary_layers,
-            num_secondary_channels,
-            num_secondary_layers,
-            num_tertiary_channels,
-            num_tertiary_layers,
-            num_quaternary_channels,
-            num_quaternary_layers,
+            input_channels,
+            primary_channels,
+            primary_layers,
+            secondary_channels,
+            secondary_layers,
+            tertiary_channels,
+            tertiary_layers,
+            quaternary_channels,
+            quaternary_layers,
         )
 
     def __init__(
         self,
-        num_primary_channels: int,
-        num_primary_layers: int,
-        num_secondary_channels: int,
-        num_secondary_layers: int,
-        num_tertiary_channels: int,
-        num_tertiary_layers: int,
-        num_quaternary_channels: int,
-        num_quaternary_layers: int,
+        input_channels: int,
+        primary_channels: int,
+        primary_layers: int,
+        secondary_channels: int,
+        secondary_layers: int,
+        tertiary_channels: int,
+        tertiary_layers: int,
+        quaternary_channels: int,
+        quaternary_layers: int,
     ):
         super().__init__()
 
         self.detector = Detector(
-            num_primary_channels,
-            num_primary_layers,
-            num_secondary_channels,
-            num_secondary_layers,
-            num_tertiary_channels,
-            num_tertiary_layers,
-            num_quaternary_channels,
-            num_quaternary_layers,
+            input_channels,
+            primary_channels,
+            primary_layers,
+            secondary_channels,
+            secondary_layers,
+            tertiary_channels,
+            tertiary_layers,
+            quaternary_channels,
+            quaternary_layers,
         )
 
         self.pool = AdaptiveAvgPool2d(1)
 
         self.flatten = Flatten(start_dim=1)
 
-        self.classifier = BinaryClassifier(num_quaternary_channels)
+        self.classifier = BinaryClassifier(quaternary_channels)
 
     @property
     def num_trainable_params(self) -> int:
@@ -761,6 +859,7 @@ class Detector(Module):
 
     def __init__(
         self,
+        input_channels: int,
         primary_channels: int,
         primary_layers: int,
         secondary_channels: int,
@@ -771,6 +870,8 @@ class Detector(Module):
         quaternary_layers: int,
     ):
         super().__init__()
+
+        assert input_channels in {1, 2, 3}, "Input channels must be either 1, 2, or 3."
 
         assert primary_layers > 0, "Number of primary layers must be greater than 0."
 
@@ -784,7 +885,7 @@ class Detector(Module):
             quaternary_layers > 0
         ), "Number of quaternary layers must be greater than 0."
 
-        self.downsample1 = PixelCrush(3, primary_channels, 2)
+        self.downsample1 = PixelCrush(input_channels, primary_channels, 2)
 
         self.stage1 = Sequential(
             *[DetectorBlock(primary_channels, 4) for _ in range(primary_layers)],

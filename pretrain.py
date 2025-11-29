@@ -19,10 +19,7 @@ from torchvision.transforms.v2 import (
     CenterCrop,
     RandomCrop,
     RandomHorizontalFlip,
-    ColorJitter,
 )
-
-from kornia.color import lab_to_rgb
 
 from torchmetrics.image import (
     PeakSignalNoiseRatio,
@@ -30,8 +27,8 @@ from torchmetrics.image import (
     VisualInformationFidelity,
 )
 
-from data import ColorCrush
-from src.magiccolor.model import MagicColor
+from data import ImageFolder
+from src.magiccolor.model import MagicColor, ColorCrush
 
 from tqdm import tqdm
 
@@ -41,24 +38,31 @@ def main():
 
     parser.add_argument("--train_images_path", default="./dataset/train", type=str)
     parser.add_argument("--test_images_path", default="./dataset/test", type=str)
-    parser.add_argument("--num_dataset_processes", default=1, type=int)
+    parser.add_argument("--num_dataset_processes", default=4, type=int)
     parser.add_argument("--target_resolution", default=256, type=int)
-    parser.add_argument("--brightness_jitter", default=0.1, type=float)
-    parser.add_argument("--contrast_jitter", default=0.1, type=float)
     parser.add_argument("--batch_size", default=32, type=int)
     parser.add_argument("--gradient_accumulation_steps", default=4, type=int)
     parser.add_argument("--num_epochs", default=100, type=int)
     parser.add_argument("--learning_rate", default=2e-4, type=float)
     parser.add_argument("--max_gradient_norm", default=2.0, type=float)
-    parser.add_argument("--primary_channels", default=32, type=int)
-    parser.add_argument("--primary_layers", default=4, type=int)
-    parser.add_argument("--secondary_channels", default=64, type=int)
-    parser.add_argument("--secondary_layers", default=4, type=int)
-    parser.add_argument("--tertiary_channels", default=128, type=int)
-    parser.add_argument("--tertiary_layers", default=6, type=int)
-    parser.add_argument("--quaternary_channels", default=256, type=int)
-    parser.add_argument("--quaternary_layers", default=6, type=int)
-    parser.add_argument("--hidden_ratio", default=2, type=int)
+    parser.add_argument("--colorizer_primary_channels", default=32, type=int)
+    parser.add_argument("--colorizer_primary_layers", default=4, type=int)
+    parser.add_argument("--colorizer_secondary_channels", default=64, type=int)
+    parser.add_argument("--colorizer_secondary_layers", default=4, type=int)
+    parser.add_argument("--colorizer_tertiary_channels", default=128, type=int)
+    parser.add_argument("--colorizer_tertiary_layers", default=6, type=int)
+    parser.add_argument("--colorizer_quaternary_channels", default=256, type=int)
+    parser.add_argument("--colorizer_quaternary_layers", default=6, type=int)
+    parser.add_argument("--colorizer_hidden_ratio", default=2, type=int)
+    parser.add_argument("--crusher_primary_channels", default=16, type=int)
+    parser.add_argument("--crusher_primary_layers", default=2, type=int)
+    parser.add_argument("--crusher_secondary_channels", default=32, type=int)
+    parser.add_argument("--crusher_secondary_layers", default=2, type=int)
+    parser.add_argument("--crusher_tertiary_channels", default=64, type=int)
+    parser.add_argument("--crusher_tertiary_layers", default=4, type=int)
+    parser.add_argument("--crusher_quaternary_channels", default=128, type=int)
+    parser.add_argument("--crusher_quaternary_layers", default=4, type=int)
+    parser.add_argument("--crusher_hidden_ratio", default=2, type=int)
     parser.add_argument("--activation_checkpointing", action="store_true")
     parser.add_argument("--eval_interval", default=2, type=int)
     parser.add_argument("--checkpoint_interval", default=2, type=int)
@@ -115,7 +119,7 @@ def main():
 
     logger = SummaryWriter(args.run_dir_path)
 
-    new_dataset = partial(ColorCrush, target_resolution=args.target_resolution)
+    new_dataset = partial(ImageFolder, target_resolution=args.target_resolution)
 
     training = new_dataset(
         args.train_images_path,
@@ -123,10 +127,6 @@ def main():
             [
                 RandomCrop(args.target_resolution),
                 RandomHorizontalFlip(),
-                # ColorJitter(
-                #     brightness=args.brightness_jitter,
-                #     contrast=args.contrast_jitter,
-                # ),
             ]
         ),
     )
@@ -146,33 +146,58 @@ def main():
     train_loader = new_dataloader(training, shuffle=True)
     test_loader = new_dataloader(testing)
 
-    model_args = {
-        "primary_channels": args.primary_channels,
-        "primary_layers": args.primary_layers,
-        "secondary_channels": args.secondary_channels,
-        "secondary_layers": args.secondary_layers,
-        "tertiary_channels": args.tertiary_channels,
-        "tertiary_layers": args.tertiary_layers,
-        "quaternary_channels": args.quaternary_channels,
-        "quaternary_layers": args.quaternary_layers,
-        "hidden_ratio": args.hidden_ratio,
+    colorizer_args = {
+        "primary_channels": args.colorizer_primary_channels,
+        "primary_layers": args.colorizer_primary_layers,
+        "secondary_channels": args.colorizer_secondary_channels,
+        "secondary_layers": args.colorizer_secondary_layers,
+        "tertiary_channels": args.colorizer_tertiary_channels,
+        "tertiary_layers": args.colorizer_tertiary_layers,
+        "quaternary_channels": args.colorizer_quaternary_channels,
+        "quaternary_layers": args.colorizer_quaternary_layers,
+        "hidden_ratio": args.colorizer_hidden_ratio,
     }
 
-    model = MagicColor(**model_args)
+    colorizer = MagicColor(**colorizer_args)
 
-    model.add_weight_norms()
+    colorizer.generator.add_weight_norms()
 
-    model = model.to(args.device)
+    colorizer = colorizer.to(args.device)
+
+    crusher_args = {
+        "primary_channels": args.crusher_primary_channels,
+        "primary_layers": args.crusher_primary_layers,
+        "secondary_channels": args.crusher_secondary_channels,
+        "secondary_layers": args.crusher_secondary_layers,
+        "tertiary_channels": args.crusher_tertiary_channels,
+        "tertiary_layers": args.crusher_tertiary_layers,
+        "quaternary_channels": args.crusher_quaternary_channels,
+        "quaternary_layers": args.crusher_quaternary_layers,
+        "hidden_ratio": args.crusher_hidden_ratio,
+    }
+
+    crusher = ColorCrush(**crusher_args)
+
+    crusher.generator.add_weight_norms()
+
+    crusher = crusher.to(args.device)
 
     l1_loss_function = L1Loss()
 
     print("Compiling models")
 
-    model = torch.compile(model)
+    colorizer = torch.compile(colorizer)
+    crusher = torch.compile(crusher)
 
-    print(f"Generator has {model.num_trainable_params:,} trainable parameters")
+    print(
+        f"Colorizer has {colorizer.generator.num_trainable_params:,} trainable parameters"
+    )
+    print(
+        f"Crusher has {crusher.generator.num_trainable_params:,} trainable parameters"
+    )
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+    colorizer_optimizer = AdamW(colorizer.parameters(), lr=args.learning_rate)
+    crusher_optimizer = AdamW(crusher.parameters(), lr=args.learning_rate)
 
     psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(args.device)
     ssim_metric = StructuralSimilarityIndexMeasure().to(args.device)
@@ -185,23 +210,28 @@ def main():
             args.checkpoint_path, map_location=args.device, weights_only=True
         )
 
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        colorizer.load_state_dict(checkpoint["colorizer"])
+        colorizer_optimizer.load_state_dict(checkpoint["colorizer_optimizer"])
+
+        crusher.load_state_dict(checkpoint["crusher"])
+        crusher_optimizer.load_state_dict(checkpoint["crusher_optimizer"])
 
         starting_epoch += checkpoint["epoch"]
 
         print("Previous checkpoint resumed successfully")
 
     if args.activation_checkpointing:
-        model.enable_activation_checkpointing()
+        colorizer.generator.enable_activation_checkpointing()
+        crusher.generator.enable_activation_checkpointing()
 
     print("Training ...")
-    model.train()
+    colorizer.train()
+    crusher.train()
 
     for epoch in range(starting_epoch, args.num_epochs + 1):
-        total_l1_loss = 0.0
+        total_colorizer_l1_loss, total_crusher_l1_loss = 0.0, 0.0
         total_batches, total_steps = 0, 0
-        total_gradient_norm = 0.0
+        total_colorizer_gradient_norm, total_crusher_gradient_norm = 0.0, 0.0
 
         for step, (x, y) in enumerate(
             tqdm(train_loader, desc=f"Epoch {epoch}", leave=False), start=1
@@ -210,54 +240,72 @@ def main():
             y = y.to(args.device, non_blocking=True)
 
             with amp_context:
-                y_pred = model.forward(x)
+                y_pred = colorizer.forward(x)
 
-                l1_loss = l1_loss_function(y_pred, y)
+                colorizer_l1_loss = l1_loss_function(y_pred, y)
 
-                scaled_loss = l1_loss / args.gradient_accumulation_steps
+                x_pred = crusher.forward(y_pred)
+
+                crusher_l1_loss = l1_loss_function(x_pred, x)
+
+                combined_loss = colorizer_l1_loss + crusher_l1_loss
+
+                scaled_loss = combined_loss / args.gradient_accumulation_steps
 
             scaled_loss.backward()
 
             if step % args.gradient_accumulation_steps == 0:
-                norm = clip_grad_norm_(model.parameters(), args.max_gradient_norm)
+                colorizer_norm = clip_grad_norm_(
+                    colorizer.parameters(), args.max_gradient_norm
+                )
+                crusher_norm = clip_grad_norm_(
+                    crusher.parameters(), args.max_gradient_norm
+                )
 
-                optimizer.step()
+                colorizer_optimizer.step()
+                crusher_optimizer.step()
 
-                optimizer.zero_grad()
+                colorizer_optimizer.zero_grad()
+                crusher_optimizer.zero_grad()
 
-                total_gradient_norm += norm.item()
+                total_colorizer_gradient_norm += colorizer_norm.item()
+                total_crusher_gradient_norm += crusher_norm.item()
 
                 total_steps += 1
 
-            total_l1_loss += l1_loss.item()
+            total_colorizer_l1_loss += colorizer_l1_loss.item()
+            total_crusher_l1_loss += crusher_l1_loss.item()
 
             total_batches += 1
 
-        average_l1_loss = total_l1_loss / total_batches
-        average_gradient_norm = total_gradient_norm / total_steps
+        average_colorizer_l1_loss = total_colorizer_l1_loss / total_batches
+        average_crusher_l1_loss = total_crusher_l1_loss / total_batches
+        average_colorizer_gradient_norm = total_colorizer_gradient_norm / total_steps
+        average_crusher_gradient_norm = total_crusher_gradient_norm / total_steps
 
-        logger.add_scalar("Pixel L1", average_l1_loss, epoch)
-        logger.add_scalar("Gradient Norm", average_gradient_norm, epoch)
+        logger.add_scalar("Colorizer Pixel L1", average_colorizer_l1_loss, epoch)
+        logger.add_scalar("Crusher Pixel L1", average_crusher_l1_loss, epoch)
+        logger.add_scalar(
+            "Colorizer Gradient Norm", average_colorizer_gradient_norm, epoch
+        )
+        logger.add_scalar("Crusher Gradient Norm", average_crusher_gradient_norm, epoch)
 
         print(
             f"Epoch {epoch}:",
-            f"Pixel L1: {average_l1_loss:.4},",
-            f"Gradient Norm: {average_gradient_norm:.4}",
+            f"Colorizer Pixel L1: {average_colorizer_l1_loss:.4},",
+            f"Crusher Pixel L1: {average_crusher_l1_loss:.4},",
+            f"Colorizer Gradient Norm: {average_colorizer_gradient_norm:.4},",
+            f"Crusher Gradient Norm: {average_crusher_gradient_norm:.4}",
         )
 
         if epoch % args.eval_interval == 0:
-            model.eval()
+            colorizer.eval()
 
             for x, y in tqdm(test_loader, desc="Testing", leave=False):
                 x = x.to(args.device, non_blocking=True)
                 y = y.to(args.device, non_blocking=True)
 
-                y = torch.cat([x, y], dim=1)
-
-                y_pred = model.colorize(x)
-
-                y = lab_to_rgb(y)
-                y_pred = lab_to_rgb(y_pred)
+                y_pred = colorizer.colorize(x)
 
                 psnr_metric.update(y_pred, y)
                 ssim_metric.update(y_pred, y)
@@ -281,14 +329,17 @@ def main():
             ssim_metric.reset()
             vif_metric.reset()
 
-            model.train()
+            colorizer.train()
 
         if epoch % args.checkpoint_interval == 0:
             checkpoint = {
                 "epoch": epoch,
-                "model_args": model_args,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
+                "colorizer_args": colorizer_args,
+                "colorizer": colorizer.state_dict(),
+                "colorizer_optimizer": colorizer_optimizer.state_dict(),
+                "crusher_args": crusher_args,
+                "crusher": crusher.state_dict(),
+                "crusher_optimizer": crusher_optimizer.state_dict(),
             }
 
             torch.save(checkpoint, args.checkpoint_path)
