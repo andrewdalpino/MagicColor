@@ -29,11 +29,11 @@ def main():
 
     checkpoint = torch.load(args.checkpoint_path, map_location="cpu", weights_only=True)
 
-    model = MagicColor(**checkpoint["colorizer_args"])
+    model = MagicColor(**checkpoint["model_args"])
 
-    model.generator.add_weight_norms()
+    model.add_weight_norms()
 
-    state_dict = checkpoint["colorizer"]
+    state_dict = checkpoint["model"]
 
     # Compensate for compiled state dict.
     for key in list(state_dict.keys()):
@@ -41,7 +41,7 @@ def main():
 
     model.load_state_dict(state_dict)
 
-    model.generator.remove_parameterizations()
+    model.remove_parameterizations()
 
     model = model.to(args.device)
 

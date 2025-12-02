@@ -13,7 +13,6 @@ from torch.nn import (
     Sequential,
     Linear,
     Conv2d,
-    Sigmoid,
     SiLU,
     PixelShuffle,
     AdaptiveAvgPool2d,
@@ -57,113 +56,6 @@ class MagicColor(Module, PyTorchModelHubMixin):
     ):
         super().__init__()
 
-        self.generator = ImageGenerator(
-            input_channels=1,
-            primary_channels=primary_channels,
-            primary_layers=primary_layers,
-            secondary_channels=secondary_channels,
-            secondary_layers=secondary_layers,
-            tertiary_channels=tertiary_channels,
-            tertiary_layers=tertiary_layers,
-            quaternary_channels=quaternary_channels,
-            quaternary_layers=quaternary_layers,
-            hidden_ratio=hidden_ratio,
-            output_channels=3,
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Predict the color channels of a grayscale image.
-
-        Args:
-            x: Input image tensor of shape (B, 1, H, W).
-        """
-
-        z = self.generator.forward(x)
-
-        return z
-
-    @torch.inference_mode()
-    def colorize(self, x: Tensor) -> Tensor:
-        """
-        Convenience method for inference.
-
-        Args:
-            x: Input image tensor of shape (B, 1, H, W).
-        """
-
-        z = self.forward(x)
-
-        z = torch.clamp(z, 0, 1)
-
-        return z
-
-
-class ColorCrush(Module):
-    """
-    Does the opposite of MagicColor, predicting the gray channel from a color image.
-    """
-
-    def __init__(
-        self,
-        primary_channels: int,
-        primary_layers: int,
-        secondary_channels: int,
-        secondary_layers: int,
-        tertiary_channels: int,
-        tertiary_layers: int,
-        quaternary_channels: int,
-        quaternary_layers: int,
-        hidden_ratio: int,
-    ):
-        super().__init__()
-
-        self.generator = ImageGenerator(
-            input_channels=3,
-            primary_channels=primary_channels,
-            primary_layers=primary_layers,
-            secondary_channels=secondary_channels,
-            secondary_layers=secondary_layers,
-            tertiary_channels=tertiary_channels,
-            tertiary_layers=tertiary_layers,
-            quaternary_channels=quaternary_channels,
-            quaternary_layers=quaternary_layers,
-            hidden_ratio=hidden_ratio,
-            output_channels=1,
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Predict the gray channel of a color image.
-
-        Args:
-            x: Input image tensor of shape (B, 3, H, W).
-        """
-
-        z = self.generator.forward(x)
-
-        return z
-
-
-class ImageGenerator(Module):
-    def __init__(
-        self,
-        input_channels: int,
-        primary_channels: int,
-        primary_layers: int,
-        secondary_channels: int,
-        secondary_layers: int,
-        tertiary_channels: int,
-        tertiary_layers: int,
-        quaternary_channels: int,
-        quaternary_layers: int,
-        hidden_ratio: int,
-        output_channels: int,
-    ):
-        super().__init__()
-
-        assert input_channels in {1, 2, 3}, "Input channels must be either 1, 2, or 3."
-
         assert primary_layers > 1, "Number of primary layers must be greater than 1."
 
         assert (
@@ -176,14 +68,8 @@ class ImageGenerator(Module):
             quaternary_layers > 1
         ), "Number of quaternary layers must be greater than 1."
 
-        assert output_channels in {
-            1,
-            2,
-            3,
-        }, "Output channels must be either 1, 2, or 3."
-
         self.encoder = Encoder(
-            input_channels,
+            1,
             primary_channels,
             ceil(primary_layers / 2),
             secondary_channels,
@@ -205,7 +91,7 @@ class ImageGenerator(Module):
             primary_channels,
             floor(primary_layers / 2),
             hidden_ratio,
-            output_channels,
+            3,
         )
 
     @property
@@ -265,6 +151,21 @@ class ImageGenerator(Module):
 
         z1, z2, z3, z4 = self.encoder.forward(x)
         z = self.decoder.forward(z4, z3, z2, z1)
+
+        return z
+    
+    @torch.inference_mode()
+    def colorize(self, x: Tensor) -> Tensor:
+        """
+        Convenience method for inference.
+
+        Args:
+            x: Input image tensor of shape (B, 1, H, W).
+        """
+
+        z = self.forward(x)
+
+        z = torch.clamp(z, 0, 1)
 
         return z
 
@@ -750,20 +651,20 @@ class Bouncer(Module):
 
         match model_size:
             case "small":
-                primary_channels = 32
-                secondary_channels = 64
-                secondary_layers = 3
-                tertiary_channels = 128
-                tertiary_layers = 6
-                quaternary_channels = 256
-
-            case "medium":
                 primary_channels = 64
-                secondary_channels = 128
+                secondary_channels = 126
                 secondary_layers = 3
                 tertiary_channels = 256
-                tertiary_layers = 12
+                tertiary_layers = 6
                 quaternary_channels = 512
+
+            case "medium":
+                primary_channels = 96
+                secondary_channels = 192
+                secondary_layers = 3
+                tertiary_channels = 384
+                tertiary_layers = 12
+                quaternary_channels = 768
 
             case "large":
                 primary_channels = 128
