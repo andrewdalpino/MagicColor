@@ -6,6 +6,7 @@ from torch.nn import Module, MSELoss, BCEWithLogitsLoss
 
 from torchvision.models import vgg19, VGG19_Weights
 
+
 class VGGLoss(Module):
     """
     A perceptual loss based on the L2 distance between low and high-level VGG19

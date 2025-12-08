@@ -11,6 +11,8 @@ from torchvision.io import decode_image
 
 from torchvision.transforms.v2 import Transform, Grayscale, ToDtype
 
+from transformers import T5Tokenizer, T5EncoderModel
+
 from PIL import Image
 
 
@@ -30,6 +32,8 @@ class ImageFolder(Dataset):
         root_path: str,
         target_resolution: int,
         pre_transform: Transform | None,
+        tokenizer: T5Tokenizer,
+        encoder: T5EncoderModel,
     ):
         if target_resolution <= 0:
             raise ValueError(
@@ -65,10 +69,17 @@ class ImageFolder(Dataset):
 
         to_tensor_transform = ToDtype(torch.float32, scale=True)
 
+        for param in encoder.parameters():
+            param.requires_grad = False
+
+        encoder.eval()
+
         self.image_paths = image_paths
         self.pre_transform = pre_transform
         self.grayscale_transform = grayscale_transform
         self.to_tensor_transform = to_tensor_transform
+        self.tokenizer = tokenizer
+        self.encoder = encoder
 
     @classmethod
     def has_image_extension(cls, filename: str) -> bool:
@@ -78,6 +89,21 @@ class ImageFolder(Dataset):
 
     def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
         image_path = self.image_paths[index]
+        caption_path = image_path + ".txt"
+
+        with open(caption_path, "r") as file:
+            caption = file.read()
+
+        tokens = self.tokenizer(
+            caption,
+            padding="max_length",
+            max_length=64,
+            padding_side="right",
+            return_tensors="pt",
+        )
+
+        with torch.inference_mode():
+            c = self.encoder.forward(**tokens).last_hidden_state.squeeze(0)
 
         image = decode_image(image_path, mode=self.IMAGE_MODE)
 
@@ -95,7 +121,7 @@ class ImageFolder(Dataset):
         assert x.shape[1] == y.shape[1], "X and y images must be the same height."
         assert x.shape[2] == y.shape[2], "X and y images must be the same width."
 
-        return x, y
+        return x, c, y
 
     def __len__(self):
         return len(self.image_paths)

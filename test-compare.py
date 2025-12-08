@@ -10,6 +10,8 @@ from torchvision.utils import make_grid, save_image
 
 from src.magiccolor.model import MagicColor
 
+from transformers import T5Tokenizer, T5EncoderModel
+
 import matplotlib.pyplot as plt
 
 
@@ -20,12 +22,17 @@ def main():
     parser.add_argument(
         "--checkpoint_path", default="./checkpoints/checkpoint.pt", type=str
     )
+    parser.add_argument("--t5_model_name", default="t5-base", type=str)
     parser.add_argument("--device", default="cpu", type=str)
 
     args = parser.parse_args()
 
     if "cuda" in args.device and not torch.cuda.is_available():
         raise RuntimeError("Cuda is not available.")
+
+    tokenizer = T5Tokenizer.from_pretrained(args.t5_model_name)
+
+    text_encoder = T5EncoderModel.from_pretrained(args.t5_model_name)
 
     checkpoint = torch.load(args.checkpoint_path, map_location="cpu", weights_only=True)
 
@@ -61,10 +68,23 @@ def main():
 
     x = x.unsqueeze(0).to(args.device)
 
+    prompt = input("Enter a prompt (or leave blank for none): ")
+
+    tokens = tokenizer(
+        prompt,
+        padding="max_length",
+        max_length=64,
+        padding_side="right",
+        return_tensors="pt",
+    )
+
+    with torch.inference_mode():
+        c = text_encoder.forward(**tokens).last_hidden_state
+
     print("Colorizing ...")
 
     with torch.inference_mode():
-        y_pred = model.colorize(x).squeeze(0)
+        y_pred = model.colorize(x, c).squeeze(0)
 
     pair = torch.stack(
         [

@@ -21,13 +21,13 @@ from torchvision.transforms.v2 import (
     RandomHorizontalFlip,
 )
 
-from kornia.color import lab_to_rgb
-
 from torchmetrics.image import (
     PeakSignalNoiseRatio,
     StructuralSimilarityIndexMeasure,
     VisualInformationFidelity,
 )
+
+from transformers import T5Tokenizer, T5EncoderModel
 
 from data import ImageFolder
 from src.magiccolor.model import MagicColor
@@ -41,8 +41,8 @@ def main():
 
     parser.add_argument("--train_images_path", default="./dataset/train", type=str)
     parser.add_argument("--test_images_path", default="./dataset/test", type=str)
-    parser.add_argument("--num_dataset_processes", default=4, type=int)
-    parser.add_argument("--target_resolution", default=512, type=int)
+    parser.add_argument("--num_dataset_processes", default=1, type=int)
+    parser.add_argument("--target_resolution", default=256, type=int)
     parser.add_argument("--batch_size", default=8, type=int)
     parser.add_argument("--gradient_accumulation_steps", default=16, type=int)
     parser.add_argument("--num_epochs", default=100, type=int)
@@ -57,6 +57,10 @@ def main():
     parser.add_argument("--quaternary_channels", default=512, type=int)
     parser.add_argument("--quaternary_layers", default=8, type=int)
     parser.add_argument("--hidden_ratio", default=2, type=int)
+    parser.add_argument("--t5_model_name", default="t5-base", type=str)
+    parser.add_argument("--q_heads", default=16, type=int)
+    parser.add_argument("--kv_heads", default=4, type=int)
+    parser.add_argument("--attention_dropout", default=0.0, type=float)
     parser.add_argument("--activation_checkpointing", action="store_true")
     parser.add_argument("--eval_interval", default=2, type=int)
     parser.add_argument("--checkpoint_interval", default=2, type=int)
@@ -113,7 +117,16 @@ def main():
 
     logger = SummaryWriter(args.run_dir_path)
 
-    new_dataset = partial(ImageFolder, target_resolution=args.target_resolution)
+    tokenizer = T5Tokenizer.from_pretrained(args.t5_model_name)
+
+    text_encoder = T5EncoderModel.from_pretrained(args.t5_model_name)
+
+    new_dataset = partial(
+        ImageFolder,
+        target_resolution=args.target_resolution,
+        tokenizer=tokenizer,
+        encoder=text_encoder,
+    )
 
     training = new_dataset(
         args.train_images_path,
@@ -150,6 +163,10 @@ def main():
         "quaternary_channels": args.quaternary_channels,
         "quaternary_layers": args.quaternary_layers,
         "hidden_ratio": args.hidden_ratio,
+        "embedding_dimensions": text_encoder.config.d_model,
+        "q_heads": args.q_heads,
+        "kv_heads": args.kv_heads,
+        "attention_dropout": args.attention_dropout,
     }
 
     model = MagicColor(**model_args)
@@ -201,14 +218,15 @@ def main():
         total_batches, total_steps = 0, 0
         total_gradient_norm = 0.0
 
-        for step, (x, y) in enumerate(
+        for step, (x, c, y) in enumerate(
             tqdm(train_loader, desc=f"Epoch {epoch}", leave=False), start=1
         ):
             x = x.to(args.device, non_blocking=True)
+            c = c.to(args.device, non_blocking=True)
             y = y.to(args.device, non_blocking=True)
 
             with amp_context:
-                y_pred = model.forward(x)
+                y_pred = model.forward(x, c)
 
                 pixel_l1_loss = l1_loss_function.forward(y_pred, y)
                 vgg22_loss, vgg54_loss = vgg_loss_function.forward(y_pred, y)
@@ -261,11 +279,12 @@ def main():
         if epoch % args.eval_interval == 0:
             model.eval()
 
-            for x, y in tqdm(test_loader, desc="Testing", leave=False):
+            for x, c, y in tqdm(test_loader, desc="Testing", leave=False):
                 x = x.to(args.device, non_blocking=True)
+                c = c.to(args.device, non_blocking=True)
                 y = y.to(args.device, non_blocking=True)
 
-                y_pred = model.colorize(x)
+                y_pred = model.colorize(x, c)
 
                 psnr_metric.update(y_pred, y)
                 ssim_metric.update(y_pred, y)

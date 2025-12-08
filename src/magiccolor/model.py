@@ -10,6 +10,7 @@ from torch import Tensor
 
 from torch.nn import (
     Module,
+    ModuleList,
     Sequential,
     Linear,
     Conv2d,
@@ -26,6 +27,7 @@ from torch.nn.utils.parametrize import (
     remove_parametrizations,
 )
 
+from torch.nn.functional import scaled_dot_product_attention
 from torch.nn.utils.parametrizations import weight_norm, spectral_norm
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
@@ -53,45 +55,29 @@ class MagicColor(Module, PyTorchModelHubMixin):
         quaternary_channels: int,
         quaternary_layers: int,
         hidden_ratio: int,
+        embedding_dimensions: int,
+        q_heads: int,
+        kv_heads: int,
+        attention_dropout: float,
     ):
         super().__init__()
 
-        assert primary_layers > 1, "Number of primary layers must be greater than 1."
-
-        assert (
-            secondary_layers > 1
-        ), "Number of secondary layers must be greater than 1."
-
-        assert tertiary_layers > 1, "Number of tertiary layers must be greater than 1."
-
-        assert (
-            quaternary_layers > 1
-        ), "Number of quaternary layers must be greater than 1."
-
-        self.encoder = Encoder(
-            1,
-            primary_channels,
-            ceil(primary_layers / 2),
-            secondary_channels,
-            ceil(secondary_layers / 2),
-            tertiary_channels,
-            ceil(tertiary_layers / 2),
-            quaternary_channels,
-            ceil(quaternary_layers / 2),
-            hidden_ratio,
-        )
-
-        self.decoder = Decoder(
-            quaternary_channels,
-            floor(quaternary_layers / 2),
-            tertiary_channels,
-            floor(tertiary_layers / 2),
-            secondary_channels,
-            floor(secondary_layers / 2),
-            primary_channels,
-            floor(primary_layers / 2),
-            hidden_ratio,
-            3,
+        self.unet = UNet(
+            in_channels=1,
+            primary_channels=primary_channels,
+            primary_layers=primary_layers,
+            secondary_channels=secondary_channels,
+            secondary_layers=secondary_layers,
+            tertiary_channels=tertiary_channels,
+            tertiary_layers=tertiary_layers,
+            quaternary_channels=quaternary_channels,
+            quaternary_layers=quaternary_layers,
+            hidden_ratio=hidden_ratio,
+            embedding_dimensions=embedding_dimensions,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            attention_dropout=attention_dropout,
+            out_channels=3,
         )
 
     @property
@@ -113,14 +99,12 @@ class MagicColor(Module, PyTorchModelHubMixin):
     def add_weight_norms(self) -> None:
         """Add weight normalization parameterization to the network."""
 
-        self.encoder.add_weight_norms()
-        self.decoder.add_weight_norms()
+        self.unet.add_weight_norms()
 
     def add_lora_adapters(self, rank: int, alpha: float) -> None:
         """Add LoRA adapters to all convolutional layers in the network."""
 
-        self.encoder.add_lora_adapters(rank, alpha)
-        self.decoder.add_lora_adapters(rank, alpha)
+        self.unet.add_lora_adapters(rank, alpha)
 
     def remove_parameterizations(self) -> None:
         """Remove all network parameterizations."""
@@ -138,32 +122,35 @@ class MagicColor(Module, PyTorchModelHubMixin):
         at every encoder and decoder block.
         """
 
-        self.encoder.enable_activation_checkpointing()
-        self.decoder.enable_activation_checkpointing()
+        self.unet.enable_activation_checkpointing()
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, c: Tensor) -> Tensor:
         """
-        Predict the color channels of a grayscale image.
-
         Args:
-            x: Input image tensor of shape (B, C, H, W).
+            x: Input image tensor of shape (B, 1, H, W).
+            c: Tokenized textual conditioning tensor of shape (B, T, D).
+
         """
 
-        z1, z2, z3, z4 = self.encoder.forward(x)
-        z = self.decoder.forward(z4, z3, z2, z1)
+        z = self.unet.forward(x, c)
+
+        s = x.expand(-1, 3, -1, -1)
+
+        z = s + z  # Global residual connection
 
         return z
-    
+
     @torch.inference_mode()
-    def colorize(self, x: Tensor) -> Tensor:
+    def colorize(self, x: Tensor, c: Tensor) -> Tensor:
         """
         Convenience method for inference.
 
         Args:
             x: Input image tensor of shape (B, 1, H, W).
+            c: Tokenized textual conditioning tensor of shape (B, T, D).
         """
 
-        z = self.forward(x)
+        z = self.forward(x, c)
 
         z = torch.clamp(z, 0, 1)
 
@@ -178,13 +165,101 @@ class ONNXModel(Module):
 
         self.model = model
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, c: Tensor) -> Tensor:
         """
         Args:
             x: Input image tensor of shape (B, 1, H, W).
+            c: Tokenized textual conditioning tensor of shape (B, T, D).
         """
 
-        return self.model.colorize(x)
+        return self.model.colorize(x, c)
+
+
+class UNet(Module):
+    def __init__(
+        self,
+        in_channels: int,
+        primary_channels: int,
+        primary_layers: int,
+        secondary_channels: int,
+        secondary_layers: int,
+        tertiary_channels: int,
+        tertiary_layers: int,
+        quaternary_channels: int,
+        quaternary_layers: int,
+        hidden_ratio: int,
+        embedding_dimensions: int,
+        q_heads: int,
+        kv_heads: int,
+        attention_dropout: float,
+        out_channels: int,
+    ):
+        super().__init__()
+
+        assert primary_layers > 1, "Number of primary layers must be greater than 1."
+
+        assert (
+            secondary_layers > 1
+        ), "Number of secondary layers must be greater than 1."
+
+        assert tertiary_layers > 1, "Number of tertiary layers must be greater than 1."
+
+        assert (
+            quaternary_layers > 1
+        ), "Number of quaternary layers must be greater than 1."
+
+        self.encoder = Encoder(
+            in_channels,
+            primary_channels,
+            ceil(primary_layers / 2),
+            secondary_channels,
+            ceil(secondary_layers / 2),
+            tertiary_channels,
+            ceil(tertiary_layers / 2),
+            quaternary_channels,
+            ceil(quaternary_layers / 2),
+            hidden_ratio,
+            embedding_dimensions,
+            q_heads,
+            kv_heads,
+            attention_dropout,
+        )
+
+        self.decoder = Decoder(
+            quaternary_channels,
+            floor(quaternary_layers / 2),
+            tertiary_channels,
+            floor(tertiary_layers / 2),
+            secondary_channels,
+            floor(secondary_layers / 2),
+            primary_channels,
+            floor(primary_layers / 2),
+            hidden_ratio,
+            embedding_dimensions,
+            q_heads,
+            kv_heads,
+            attention_dropout,
+            out_channels,
+        )
+
+    def add_weight_norms(self) -> None:
+        self.encoder.add_weight_norms()
+        self.decoder.add_weight_norms()
+
+    def add_lora_adapters(self, rank: int, alpha: float) -> None:
+        self.encoder.add_lora_adapters(rank, alpha)
+        self.decoder.add_lora_adapters(rank, alpha)
+
+    def enable_activation_checkpointing(self) -> None:
+        self.encoder.enable_activation_checkpointing()
+        self.decoder.enable_activation_checkpointing()
+
+    def forward(self, x: Tensor, c: Tensor) -> Tensor:
+        z1, z2, z3, z4 = self.encoder.forward(x, c)
+
+        z = self.decoder.forward(z4, z3, z2, z1, c)
+
+        return z
 
 
 class Encoder(Module):
@@ -202,6 +277,10 @@ class Encoder(Module):
         quaternary_channels: int,
         quaternary_layers: int,
         hidden_ratio: int,
+        embedding_dimensions: int,
+        q_heads: int,
+        kv_heads: int,
+        attention_dropout: float,
     ):
         super().__init__()
 
@@ -219,30 +298,58 @@ class Encoder(Module):
 
         self.stem = Conv2d(input_channels, primary_channels, kernel_size=1)
 
-        self.stage1 = Sequential(
-            *[
-                EncoderBlock(primary_channels, hidden_ratio)
+        self.stage1 = ModuleList(
+            [
+                EncoderBlock(
+                    primary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(primary_layers)
             ]
         )
 
-        self.stage2 = Sequential(
-            *[
-                EncoderBlock(secondary_channels, hidden_ratio)
+        self.stage2 = ModuleList(
+            [
+                EncoderBlock(
+                    secondary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(secondary_layers)
             ]
         )
 
-        self.stage3 = Sequential(
-            *[
-                EncoderBlock(tertiary_channels, hidden_ratio)
+        self.stage3 = ModuleList(
+            [
+                EncoderBlock(
+                    tertiary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(tertiary_layers)
             ]
         )
 
-        self.stage4 = Sequential(
-            *[
-                EncoderBlock(quaternary_channels, hidden_ratio)
+        self.stage4 = ModuleList(
+            [
+                EncoderBlock(
+                    quaternary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(quaternary_layers)
             ]
         )
@@ -251,7 +358,7 @@ class Encoder(Module):
         self.downsample2 = PixelCrush(secondary_channels, tertiary_channels, 2)
         self.downsample3 = PixelCrush(tertiary_channels, quaternary_channels, 2)
 
-        self.checkpoint = lambda layer, x: layer.forward(x)
+        self.checkpoint = lambda layer, x, c: layer.forward(x, c)
 
     def add_weight_norms(self) -> None:
         self.stem = weight_norm(self.stem)
@@ -301,18 +408,26 @@ class Encoder(Module):
 
         self.checkpoint = partial(torch_checkpoint, use_reentrant=False)
 
-    def forward(self, x: Tensor) -> tuple[Tensor, ...]:
+    def forward(self, x: Tensor, c: Tensor) -> tuple[Tensor, ...]:
         z1 = self.stem.forward(x)
-        z1 = self.checkpoint(self.stage1, z1)
+
+        for layer in self.stage1:
+            z1 = self.checkpoint(layer, z1, c)
 
         z2 = self.downsample1.forward(z1)
-        z2 = self.checkpoint(self.stage2, z2)
+
+        for layer in self.stage2:
+            z2 = self.checkpoint(layer, z2, c)
 
         z3 = self.downsample2.forward(z2)
-        z3 = self.checkpoint(self.stage3, z3)
+
+        for layer in self.stage3:
+            z3 = self.checkpoint(layer, z3, c)
 
         z4 = self.downsample3.forward(z3)
-        z4 = self.checkpoint(self.stage4, z4)
+
+        for layer in self.stage4:
+            z4 = self.checkpoint(layer, z4, c)
 
         return z1, z2, z3, z4
 
@@ -320,21 +435,139 @@ class Encoder(Module):
 class EncoderBlock(Module):
     """A single encoder block consisting of two stages and a residual connection."""
 
-    def __init__(self, num_channels: int, hidden_ratio: int):
+    def __init__(
+        self,
+        num_channels: int,
+        embedding_dimensions: int,
+        q_heads: int,
+        kv_heads: int,
+        hidden_ratio: int,
+        dropout: float,
+    ):
         super().__init__()
 
-        self.stage1 = InvertedBottleneck(num_channels, hidden_ratio)
+        self.stage1 = CrossAttention(
+            num_channels=num_channels,
+            embedding_dimensions=embedding_dimensions,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            dropout=dropout,
+        )
+
+        self.stage2 = InvertedBottleneck(num_channels, hidden_ratio)
 
     def add_weight_norms(self) -> None:
-        self.stage1.add_weight_norms()
+        self.stage2.add_weight_norms()
 
     def add_lora_adapters(self, rank: int, alpha: float) -> None:
         self.stage1.add_lora_adapters(rank, alpha)
+        self.stage2.add_lora_adapters(rank, alpha)
 
-    def forward(self, x: Tensor) -> Tensor:
-        z = self.stage1.forward(x)
+    def forward(self, x: Tensor, c: Tensor) -> Tensor:
+        z = self.stage1.forward(x, c)
+        z = self.stage2.forward(z)
 
         z = x + z  # Local residual connection
+
+        return z
+
+
+class CrossAttention(Module):
+    """Group query cross-attention for attending to textual embeddings."""
+
+    def __init__(
+        self,
+        num_channels: int,
+        embedding_dimensions: int,
+        q_heads: int,
+        kv_heads: int,
+        dropout: float,
+    ):
+        super().__init__()
+
+        assert embedding_dimensions > 0, "Embedding dimensions must be greater than 0."
+        assert q_heads > 0, "Number of query heads must be greater than 0."
+        assert kv_heads > 0, "Number of key-value heads must be greater than 0."
+
+        assert (
+            q_heads >= kv_heads
+        ), "Number of query heads must be greater than or equal to the number of key-value heads."
+
+        assert (
+            embedding_dimensions % q_heads == 0
+        ), "Embedding dimensions must be divisible by the number of query heads."
+
+        head_dimensions = num_channels // q_heads
+
+        kv_dimensions = kv_heads * head_dimensions
+
+        self.q_proj = Linear(num_channels, num_channels, bias=False)
+        self.k_proj = Linear(embedding_dimensions, kv_dimensions, bias=False)
+        self.v_proj = Linear(embedding_dimensions, kv_dimensions, bias=False)
+
+        self.out_proj = Linear(num_channels, num_channels, bias=False)
+
+        scale = 1.0 / sqrt(head_dimensions)
+
+        is_gqa = q_heads > kv_heads
+
+        self.num_channels = num_channels
+        self.embedding_dimensions = embedding_dimensions
+        self.q_heads = q_heads
+        self.kv_heads = kv_heads
+        self.head_dimensions = head_dimensions
+        self.scale = scale
+        self.is_gqa = is_gqa
+        self.dropout = dropout
+
+    def add_lora_adapters(self, rank: int, alpha: float) -> None:
+        """Reparameterize the weights of the attention module using LoRA adapters."""
+
+        register_parametrization(
+            self.q_proj, "weight", LoRA.from_linear(self.q_proj, rank, alpha)
+        )
+
+        register_parametrization(
+            self.k_proj, "weight", LoRA.from_linear(self.k_proj, rank, alpha)
+        )
+
+        register_parametrization(
+            self.v_proj, "weight", LoRA.from_linear(self.v_proj, rank, alpha)
+        )
+
+        register_parametrization(
+            self.out_proj, "weight", LoRA.from_linear(self.out_proj, rank, alpha)
+        )
+
+    def forward(self, x: Tensor, c: Tensor) -> Tensor:
+        b, ch, h, w = x.size()
+        _, t, d = c.size()
+
+        x_hat = x.view(b, ch, h * w).permute(0, 2, 1)  # (B, HW, C)
+
+        q = self.q_proj.forward(x_hat)
+        k = self.k_proj.forward(c)
+        v = self.v_proj.forward(c)
+
+        q = q.view(b, h * w, self.q_heads, self.head_dimensions).transpose(1, 2)
+        k = k.view(b, t, self.kv_heads, self.head_dimensions).transpose(1, 2)
+        v = v.view(b, t, self.kv_heads, self.head_dimensions).transpose(1, 2)
+
+        z = scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            scale=self.scale,
+            dropout_p=self.dropout if self.training else 0,
+            is_causal=True,
+            enable_gqa=self.is_gqa,
+        )
+
+        z = z.transpose(1, 2).contiguous().view(b, h * w, ch)
+
+        z = self.out_proj.forward(z)
+
+        z = z.permute(0, 2, 1).view(b, ch, h, w)
 
         return z
 
@@ -432,6 +665,10 @@ class Decoder(Module):
         quaternary_channels: int,
         quaternary_layers: int,
         hidden_ratio: int,
+        embedding_dimensions: int,
+        q_heads: int,
+        kv_heads: int,
+        attention_dropout: float,
         output_channels: int,
     ):
         super().__init__()
@@ -448,30 +685,58 @@ class Decoder(Module):
             quaternary_layers > 0
         ), "Number of quaternary layers must be greater than 0."
 
-        self.stage1 = Sequential(
-            *[
-                DecoderBlock(primary_channels, hidden_ratio)
+        self.stage1 = ModuleList(
+            [
+                DecoderBlock(
+                    primary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(primary_layers)
             ]
         )
 
-        self.stage2 = Sequential(
-            *[
-                DecoderBlock(secondary_channels, hidden_ratio)
+        self.stage2 = ModuleList(
+            [
+                DecoderBlock(
+                    secondary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(secondary_layers)
             ]
         )
 
-        self.stage3 = Sequential(
-            *[
-                DecoderBlock(tertiary_channels, hidden_ratio)
+        self.stage3 = ModuleList(
+            [
+                DecoderBlock(
+                    tertiary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(tertiary_layers)
             ]
         )
 
-        self.stage4 = Sequential(
-            *[
-                DecoderBlock(quaternary_channels, hidden_ratio)
+        self.stage4 = ModuleList(
+            [
+                DecoderBlock(
+                    quaternary_channels,
+                    embedding_dimensions,
+                    q_heads,
+                    kv_heads,
+                    hidden_ratio,
+                    attention_dropout,
+                )
                 for _ in range(quaternary_layers)
             ]
         )
@@ -482,7 +747,7 @@ class Decoder(Module):
 
         self.head = Conv2d(quaternary_channels, output_channels, kernel_size=1)
 
-        self.checkpoint = lambda layer, x: layer.forward(x)
+        self.checkpoint = lambda layer, x, c: layer.forward(x, c)
 
     def add_weight_norms(self) -> None:
         for layer in self.stage1:
@@ -532,23 +797,35 @@ class Decoder(Module):
 
         self.checkpoint = partial(torch_checkpoint, use_reentrant=False)
 
-    def forward(self, x1: Tensor, x2: Tensor, x3: Tensor, x4: Tensor) -> Tensor:
-        z = self.checkpoint(self.stage1, x1)
+    def forward(
+        self, x1: Tensor, x2: Tensor, x3: Tensor, x4: Tensor, c: Tensor
+    ) -> Tensor:
+        z = x1
+
+        for layer in self.stage1:
+            z = self.checkpoint(layer, z, c)
+
         z = self.upsample1.forward(z)
 
-        z = x2 + z  # Global residual connection
+        z = x2 + z  # Regional residual connection
 
-        z = self.checkpoint(self.stage2, z)
+        for layer in self.stage2:
+            z = self.checkpoint(layer, z, c)
+
         z = self.upsample2.forward(z)
 
-        z = x3 + z  # Global residual connection
+        z = x3 + z  # Regional residual connection
 
-        z = self.checkpoint(self.stage3, z)
+        for layer in self.stage3:
+            z = self.checkpoint(layer, z, c)
+
         z = self.upsample3.forward(z)
 
-        z = x4 + z  # Global residual connection
+        z = x4 + z  # Regional residual connection
 
-        z = self.checkpoint(self.stage4, z)
+        for layer in self.stage4:
+            z = self.checkpoint(layer, z, c)
+
         z = self.head.forward(z)
 
         return z
@@ -599,6 +876,39 @@ class SubpixelConv2d(Module):
     def forward(self, x: Tensor) -> Tensor:
         z = self.conv.forward(x)
         z = self.shuffle.forward(z)
+
+        return z
+
+
+class LoRA(Module):
+    """Low rank weight decomposition transformation."""
+
+    @classmethod
+    def from_linear(cls, linear: Linear, rank: int, alpha: float) -> Self:
+        out_features, in_features = linear.weight.shape
+
+        return cls(in_features, out_features, rank, alpha)
+
+    def __init__(self, in_features: int, out_features: int, rank: int, alpha: float):
+        super().__init__()
+
+        assert rank > 0, "Rank must be greater than 0."
+        assert alpha > 0.0, "Alpha must be greater than 0."
+
+        lora_a = torch.randn(rank, in_features) / sqrt(rank)
+        lora_b = torch.zeros(out_features, rank)
+
+        self.lora_a = Parameter(lora_a)
+        self.lora_b = Parameter(lora_b)
+
+        self.alpha = alpha
+
+    def forward(self, weight: Tensor) -> Tensor:
+        z = self.lora_b @ self.lora_a
+
+        z *= self.alpha
+
+        z = weight + z
 
         return z
 
